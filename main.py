@@ -13,15 +13,28 @@ from config import TOWN_GENERATION
 from mapgen import render_terrain
 from towngen import (
     DEFAULT_HEIGHTMAP_PATH,
+    export_town_data_to_csv,
     generate_towns,
     project_town_pixels_to_plot,
     project_town_to_plot,
+)
+from transportgen import (
+    DEFAULT_TRANSPORT_NETWORK_PATH,
+    DEFAULT_TRANSPORT_OVERLAY_PATH,
+    export_transport_routes_to_csv,
+    generate_transport_network,
+    network_to_dict,
+    project_transport_network_to_plot,
+    project_transport_overlay_layers_to_plots,
+    transport_overlay_png_data_uris,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_PATH = BASE_DIR / "web" / "town_map.html"
 DEFAULT_PLOT_OUTPUT_PATH = BASE_DIR / "web" / "town_pixels_only.png"
 DEFAULT_TERRAIN_PLOT_OUTPUT_PATH = BASE_DIR / "web" / "town_pixels_overlay.png"
+DEFAULT_CSV_OUTPUT_PATH = BASE_DIR / "csv" / "town_data.csv"
+DEFAULT_TRANSPORT_CSV_OUTPUT_PATH = BASE_DIR / "csv" / "transport_routes.csv"
 
 
 def _terrain_png_data_uri(placement_map, max_render_size=1024):
@@ -102,6 +115,7 @@ def _towns_to_dicts(towns, placement_map):
 def build_town_map_html(
     towns,
     placement_map,
+    transport_network=None,
     title="Generated Town Map",
     max_render_size=1024,
 ):
@@ -125,6 +139,39 @@ def build_town_map_html(
         size: sum(1 for town in town_data if town["size"] == size)
         for size in ("Ghost Town", "Hamlet/Outpost", "Village", "Town", "City", "Metropolis", "Megaopolis")
     }
+    transport_summary = network_to_dict(transport_network) if transport_network else None
+    transport_overlay_image_uris = (
+        transport_overlay_png_data_uris(
+            transport_network,
+            placement_map,
+            max_render_size=max_render_size,
+        )
+        if transport_network
+        else None
+    )
+    transport_summary_html = ""
+    transport_legend_html = ""
+    transport_toggle_html = ""
+    if transport_summary:
+        transport_summary_html = f"""
+        <span><strong>{transport_summary["roads"]}</strong>road segments</span>
+        <span><strong>{transport_summary["bridges"]}</strong>bridges</span>
+        <span><strong>{transport_summary["freeways"]}</strong>freeways</span>
+        <span><strong>{transport_summary["railways"]}</strong>railways</span>
+        <span><strong>{transport_summary["airways"]}</strong>air routes</span>"""
+        transport_legend_html = """
+            <span><i class="swatch road"></i>Road</span>
+            <span><i class="swatch freeway"></i>Freeway</span>
+            <span><i class="swatch railway"></i>Railway</span>
+            <span><i class="swatch airway"></i>Air route</span>"""
+        transport_toggle_html = """
+          <div class="transport-toggles" aria-label="Transport overlays">
+            <label><input type="checkbox" data-transport-layer="roads" checked><i class="swatch road"></i>Roads</label>
+            <label><input type="checkbox" data-transport-layer="bridges" checked><i class="swatch bridge"></i>Bridges</label>
+            <label><input type="checkbox" data-transport-layer="freeways" checked><i class="swatch freeway"></i>Freeways</label>
+            <label><input type="checkbox" data-transport-layer="railways" checked><i class="swatch railway"></i>Railways</label>
+            <label><input type="checkbox" data-transport-layer="airways" checked><i class="swatch airway"></i>Air routes</label>
+          </div>"""
 
     payload = {
         "towns": town_data,
@@ -133,7 +180,9 @@ def build_town_map_html(
             "height": placement_map.height,
             "terrain_image_uri": terrain_image_uri,
             "footprint_image_uri": footprint_image_uri,
+            "transport_overlay_image_uris": transport_overlay_image_uris,
         },
+        "transport": transport_summary,
     }
 
     return f"""<!doctype html>
@@ -259,6 +308,34 @@ def build_town_map_html(
       white-space: nowrap;
     }}
 
+    .transport-toggles {{
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+
+    .transport-toggles label {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfb;
+      cursor: pointer;
+      user-select: none;
+    }}
+
+    .transport-toggles input {{
+      margin: 0;
+      accent-color: var(--accent);
+    }}
+
     .swatch {{
       width: 10px;
       height: 10px;
@@ -270,6 +347,11 @@ def build_town_map_html(
     .swatch.plains {{ background: var(--plains); }}
     .swatch.hills {{ background: var(--hills); }}
     .swatch.town-area {{ background: #007aff; }}
+    .swatch.road {{ background: #4b5563; }}
+    .swatch.bridge {{ background: #2563eb; }}
+    .swatch.freeway {{ background: #f97316; }}
+    .swatch.railway {{ background: #111827; }}
+    .swatch.airway {{ background: #7c3aed; }}
 
     .map-shell {{
       position: relative;
@@ -290,6 +372,10 @@ def build_town_map_html(
 
     .town-footprint-image {{
       image-rendering: pixelated;
+      pointer-events: none;
+    }}
+
+    .transport-overlay-image {{
       pointer-events: none;
     }}
 
@@ -436,6 +522,7 @@ def build_town_map_html(
         <span><strong>{town_size_counts["City"]}</strong>cities</span>
         <span><strong>{town_size_counts["Metropolis"]}</strong>metropolises</span>
         <span><strong>{town_size_counts["Megaopolis"]}</strong>megaopolises</span>
+        {transport_summary_html}
       </div>
     </header>
     <section class="workspace">
@@ -446,8 +533,10 @@ def build_town_map_html(
             <span><i class="swatch plains"></i>Plains</span>
             <span><i class="swatch hills"></i>Hills</span>
             <span><i class="swatch town-area"></i>Town area</span>
+            {transport_legend_html}
             <span><i class="swatch"></i>Town center</span>
           </div>
+          {transport_toggle_html}
         </div>
         <div class="map-shell">
           <svg id="town-map" role="img" aria-label="Terrain map with town center points"></svg>
@@ -496,15 +585,21 @@ def build_town_map_html(
     }};
 
     svg.setAttribute("viewBox", `0 0 ${{map.width}} ${{map.height}}`);
+    const transportLayers = map.transport_overlay_image_uris || {{}};
+    const transportLayerImages = Object.entries(transportLayers).map(([layer, uri]) =>
+      `<image class="transport-overlay-image" data-transport-layer="${{layer}}" href="${{uri}}" x="0" y="0" width="${{map.width}}" height="${{map.height}}" preserveAspectRatio="none"></image>`
+    ).join("");
     svg.innerHTML = `
       <image class="terrain-image" href="${{map.terrain_image_uri}}" x="0" y="0" width="${{map.width}}" height="${{map.height}}" preserveAspectRatio="none"></image>
       <image class="town-footprint-image" href="${{map.footprint_image_uri}}" x="0" y="0" width="${{map.width}}" height="${{map.height}}" preserveAspectRatio="none"></image>
+      ${{transportLayerImages}}
       <g id="town-points"></g>
     `;
 
     const pointsLayer = document.getElementById("town-points");
     const rowsById = new Map();
     const pointsById = new Map();
+    const transportToggles = document.querySelectorAll("[data-transport-layer][type='checkbox']");
 
     function formatNumber(value) {{
       return new Intl.NumberFormat().format(value);
@@ -615,6 +710,14 @@ def build_town_map_html(
     }}
 
     searchInput.addEventListener("input", (event) => renderTable(event.target.value));
+    transportToggles.forEach((toggle) => {{
+      toggle.addEventListener("change", () => {{
+        const layer = toggle.dataset.transportLayer;
+        document.querySelectorAll(`.transport-overlay-image[data-transport-layer="${{layer}}"]`).forEach((image) => {{
+          image.style.display = toggle.checked ? "" : "none";
+        }});
+      }});
+    }});
     drawPoints();
     renderTable();
   </script>
@@ -627,6 +730,9 @@ def write_town_map(
     output_path=DEFAULT_OUTPUT_PATH,
     plot_output_path=DEFAULT_PLOT_OUTPUT_PATH,
     terrain_plot_output_path=None,
+    transport_output_path=DEFAULT_TRANSPORT_NETWORK_PATH,
+    transport_overlay_output_path=DEFAULT_TRANSPORT_OVERLAY_PATH,
+    include_transport=True,
     town_count=TOWN_GENERATION["default_town_count"],
     heightmap_path=DEFAULT_HEIGHTMAP_PATH,
     threshold_km=TOWN_GENERATION["default_spacing_threshold_km"],
@@ -639,9 +745,13 @@ def write_town_map(
         threshold_km=threshold_km,
         max_attempts=max_attempts,
     )
+    transport_network = (
+        generate_transport_network(towns, placement_map) if include_transport else None
+    )
     html = build_town_map_html(
         towns,
         placement_map,
+        transport_network=transport_network,
         max_render_size=max_render_size,
     )
 
@@ -665,7 +775,24 @@ def write_town_map(
             show=False,
         )
 
-    return output_path, towns
+    if transport_network and transport_output_path:
+        project_transport_network_to_plot(
+            transport_network,
+            placement_map,
+            output_path=transport_output_path,
+            show=False,
+        )
+
+    if transport_network and transport_overlay_output_path:
+        project_transport_overlay_layers_to_plots(
+            transport_network,
+            placement_map,
+            output_path=transport_overlay_output_path,
+            show=False,
+            max_render_size=max_render_size,
+        )
+
+    return output_path, towns, placement_map, transport_network
 
 
 def parse_args():
@@ -677,8 +804,26 @@ def parse_args():
     parser.add_argument("--output", default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--plot-output", default=DEFAULT_PLOT_OUTPUT_PATH)
     parser.add_argument("--terrain-plot-output", default=DEFAULT_TERRAIN_PLOT_OUTPUT_PATH)
+    parser.add_argument("--transport-output", default=DEFAULT_TRANSPORT_NETWORK_PATH)
+    parser.add_argument("--transport-overlay-output", default=DEFAULT_TRANSPORT_OVERLAY_PATH)
     parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument("--no-transport", action="store_true")
     parser.add_argument("--write-terrain-plot", action="store_true")
+    parser.add_argument(
+        "--export-csv",
+        action="store_true",
+        help="Export generated town data to CSV.",
+    )
+    parser.add_argument("--csv-output", default=DEFAULT_CSV_OUTPUT_PATH)
+    parser.add_argument(
+        "--export-transport-csv",
+        action="store_true",
+        help="Export generated transport route data to CSV.",
+    )
+    parser.add_argument(
+        "--transport-csv-output",
+        default=DEFAULT_TRANSPORT_CSV_OUTPUT_PATH,
+    )
     parser.add_argument(
         "--threshold-km",
         type=float,
@@ -695,12 +840,17 @@ def parse_args():
 
 def main():
     args = parse_args()
-    output_path, towns = write_town_map(
+    output_path, towns, placement_map, transport_network = write_town_map(
         output_path=args.output,
         plot_output_path=None if args.no_plot else args.plot_output,
         terrain_plot_output_path=(
             args.terrain_plot_output if args.write_terrain_plot else None
         ),
+        transport_output_path=None if args.no_transport else args.transport_output,
+        transport_overlay_output_path=(
+            None if args.no_transport else args.transport_overlay_output
+        ),
+        include_transport=not args.no_transport,
         town_count=args.towns,
         heightmap_path=args.heightmap,
         threshold_km=args.threshold_km,
@@ -711,8 +861,33 @@ def main():
     print(f"Wrote interactive web map to {output_path}")
     if not args.no_plot:
         print(f"Wrote Matplotlib town pixels plot to {args.plot_output}")
+    if transport_network:
+        summary = network_to_dict(transport_network)
+        print(
+            "Generated transport network: "
+            f"{summary['roads']} roads, "
+            f"{summary['bridges']} bridges, "
+            f"{summary['freeways']} freeway segments, "
+            f"{summary['railways']} railway segments, "
+            f"{summary['airways']} air routes"
+        )
+        print(f"Wrote transport network plot to {args.transport_output}")
+        print(f"Wrote transparent transport overlay layers using base path {args.transport_overlay_output}")
     if args.write_terrain_plot:
         print(f"Wrote Matplotlib terrain overlay to {args.terrain_plot_output}")
+    if args.export_csv:
+        export_town_data_to_csv(towns, args.csv_output)
+        print(f"Wrote generated town data CSV to {args.csv_output}")
+    if args.export_transport_csv:
+        if not transport_network:
+            print("Skipped transport route CSV export because transport generation is disabled.")
+        else:
+            export_transport_routes_to_csv(
+                transport_network,
+                placement_map,
+                args.transport_csv_output,
+            )
+            print(f"Wrote generated transport route CSV to {args.transport_csv_output}")
 
 
 if __name__ == "__main__":
