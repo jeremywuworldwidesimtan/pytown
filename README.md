@@ -7,3 +7,18 @@ This is just a fun side experiment that I build with Codex to create a fictional
 Comes with a procedural map generator `mapgen.py` using OpenSimplex, a procedural town name generator `townnamegen.py`, a procedural town generator `towngen.py` and a main program `main.py` for visualizing the generated worlds.
 
 I plan to make a logistics/transport simulator similar to OpenTTD with this procedurally generated world. 
+
+---
+
+To run the React UI
+
+```bash
+cd C:\Users\alant\Documents\Projects\py\pytown
+uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+cd C:\Users\alant\Documents\Projects\py\pytown\ui
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
+```

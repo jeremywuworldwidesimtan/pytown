@@ -422,6 +422,18 @@ function MapCanvas({
     updateScale(view.scale + delta);
   }
 
+  function selectTownFromMarker(event, town) {
+    event.stopPropagation();
+    onSelectTown(town.id);
+  }
+
+  function handleTownMarkerKeyDown(event, town) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectTownFromMarker(event, town);
+    }
+  }
+
   return (
     <main className="relative min-w-0 flex-1 overflow-hidden bg-[#d7e2d7]">
       <div className="absolute left-4 top-4 z-20 flex max-w-[calc(100%-96px)] flex-wrap gap-2">
@@ -510,25 +522,42 @@ function MapCanvas({
             {towns.map((town) => {
               const selected = selectedTownId === town.id;
               return (
-                <circle
+                <g
                   key={town.id}
-                  cx={town.screen_x}
-                  cy={town.screen_y}
-                  r={selected ? 16 : 9}
-                  fill={selected ? "#d7263d" : TERRAIN_COLORS[town.terrain] ?? "#0f766e"}
-                  stroke="white"
-                  strokeWidth={selected ? 7 : 5}
-                  vectorEffect="non-scaling-stroke"
-                  className="cursor-pointer transition-[r,fill] duration-100"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onSelectTown(town.id);
-                  }}
+                  className="town-marker cursor-pointer"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${town.name}, ${town.display_size}, ${town.formatted_population} population`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onPointerMove={(event) => event.stopPropagation()}
+                  onPointerUp={(event) => event.stopPropagation()}
+                  onClick={(event) => selectTownFromMarker(event, town)}
+                  onKeyDown={(event) => handleTownMarkerKeyDown(event, town)}
                 >
+                  <circle
+                    cx={town.screen_x}
+                    cy={town.screen_y}
+                    r={22}
+                    fill="transparent"
+                    stroke="transparent"
+                    pointerEvents="all"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <circle
+                    cx={town.screen_x}
+                    cy={town.screen_y}
+                    r={selected ? 16 : 9}
+                    fill={selected ? "#d7263d" : TERRAIN_COLORS[town.terrain] ?? "#0f766e"}
+                    stroke="white"
+                    strokeWidth={selected ? 7 : 5}
+                    vectorEffect="non-scaling-stroke"
+                    className="transition-[r,fill] duration-100"
+                    pointerEvents="none"
+                  />
                   <title>
                     {town.name} · {town.display_size} · {town.formatted_population}
                   </title>
-                </circle>
+                </g>
               );
             })}
           </g>

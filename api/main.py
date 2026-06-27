@@ -4,12 +4,15 @@ import base64
 import json
 import re
 import sqlite3
+from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 from typing import Iterable
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from PIL import Image
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -109,6 +112,20 @@ def _rows_to_count_map(rows: Iterable[sqlite3.Row]) -> dict[str, int]:
     return {row[0]: row[1] for row in rows}
 
 
+@lru_cache(maxsize=1)
+def _display_oriented_world_render() -> bytes:
+    if not WORLD_RENDER_PATH.exists():
+        raise HTTPException(status_code=404, detail="World render not found.")
+
+    image_buffer = BytesIO()
+    with Image.open(WORLD_RENDER_PATH) as image:
+        image.transpose(Image.Transpose.FLIP_TOP_BOTTOM).save(
+            image_buffer,
+            format="PNG",
+        )
+    return image_buffer.getvalue()
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
@@ -170,7 +187,7 @@ def get_map() -> dict:
             "max_y": summary["max_y"],
         },
         "images": {
-            "terrain": "/assets/world-render.png",
+            "terrain": "/assets/world-render.png?orientation=display-v2",
             "town_footprints": "/assets/town-footprints.png",
             "transport_overlays": {
                 layer: f"/assets/transport/{layer}.png"
@@ -280,10 +297,12 @@ def get_transport_routes(types: str | None = Query(default=None)) -> dict:
 
 
 @app.get("/assets/world-render.png")
-def world_render() -> FileResponse:
-    if not WORLD_RENDER_PATH.exists():
-        raise HTTPException(status_code=404, detail="World render not found.")
-    return FileResponse(WORLD_RENDER_PATH, media_type="image/png")
+def world_render() -> Response:
+    return Response(
+        content=_display_oriented_world_render(),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/assets/town-footprints.png")
