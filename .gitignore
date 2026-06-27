@@ -2,4 +2,8 @@ __pycache__/
 .venv/
 .agents/
 
+csv/
+web/
 *.csv
+*.png
+*.db
