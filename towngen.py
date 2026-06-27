@@ -773,6 +773,7 @@ def export_town_data_to_csv(towns, filename=None):
         writer = csv.writer(file)
         writer.writerow(
             [
+                "Town ID",
                 "Name",
                 "Size",
                 "Specialization",
@@ -789,9 +790,10 @@ def export_town_data_to_csv(towns, filename=None):
                 "Y Coordinate",
             ]
         )
-        for town in towns:
+        for town_id, town in enumerate(towns):
             writer.writerow(
                 [
+                    town_id,
                     town.name,
                     town.size,
                     town.specialization if town.specialization else "",
