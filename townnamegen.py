@@ -1,6 +1,8 @@
 import random
 
-random.seed(42)  # Initialize the random number generator
+from config import GLOBAL_SEED, TOWN_NAME_GENERATOR
+
+random.seed(GLOBAL_SEED)  # Initialize the random number generator
 
 # Weighted probability of consonants based on English lexicon
 base_consonant_weights = {
@@ -46,25 +48,47 @@ def generate_weighted(weights_dict):
     weights = list(weights_dict.values())
     return random.choices(components, weights=weights)[0]
 
-def generate_name_component(enable_extra_consonant=False, vowel_start=False):
+def generate_name_component(
+    enable_extra_consonant=False,
+    vowel_start=False,
+    extra_consonant_prob=TOWN_NAME_GENERATOR["extra_consonant_prob"],
+):
     front_consonants = [generate_weighted(consonant_weights)]
-    extra_consonant = random.choices([True, False], weights=[0.1, 0.9])[0] if enable_extra_consonant else False  # 10% chance to add an extra consonant
+    extra_consonant = (
+        random.random() < extra_consonant_prob
+        if enable_extra_consonant
+        else False
+    )
     return (random.choice(front_consonants) + \
            generate_weighted(vowel_weights) + \
            (generate_weighted(base_consonant_weights) if extra_consonant else "")) if not vowel_start else \
             (generate_weighted(base_vowel_weights) + \
             (generate_weighted(base_consonant_weights) if extra_consonant else ""))
 
-def generate_town_name(suffix_prob=0.3, prefix_prob=0.2, geo_prob=0.2, vowel_start_prob=0.2, name_length_max=6, enable_dashes=True):
+def generate_town_name(
+    suffix_prob=TOWN_NAME_GENERATOR["suffix_prob"],
+    prefix_prob=TOWN_NAME_GENERATOR["prefix_prob"],
+    geo_prob=TOWN_NAME_GENERATOR["geo_prob"],
+    vowel_start_prob=TOWN_NAME_GENERATOR["vowel_start_prob"],
+    name_length_max=TOWN_NAME_GENERATOR["name_length_max"],
+    enable_dashes=TOWN_NAME_GENERATOR["enable_dashes"],
+    extra_consonant_prob=TOWN_NAME_GENERATOR["extra_consonant_prob"],
+    end_consonant_prob=TOWN_NAME_GENERATOR["end_consonant_prob"]
+):
     name = ""
     if random.random() < suffix_prob:
         name_length = random.randint(1,2)
     
         for i in range(name_length):
             if i == 0 and random.random() < vowel_start_prob:
-                name += generate_name_component(vowel_start=True)
+                name += generate_name_component(
+                    vowel_start=True,
+                    extra_consonant_prob=extra_consonant_prob,
+                )
             else:
-                name += generate_name_component()
+                name += generate_name_component(
+                    extra_consonant_prob=extra_consonant_prob,
+                )
     
         name += random.choice(eng_town_suffixes)
     else:
@@ -72,15 +96,28 @@ def generate_town_name(suffix_prob=0.3, prefix_prob=0.2, geo_prob=0.2, vowel_sta
     
         for i in range(name_length-1):
             if i == 0 and random.random() < vowel_start_prob:
-                name += generate_name_component(vowel_start=True)
+                name += generate_name_component(
+                    vowel_start=True,
+                    extra_consonant_prob=extra_consonant_prob,
+                )
             else:
-                name += generate_name_component(enable_extra_consonant=True)
+                name += generate_name_component(
+                    enable_extra_consonant=True,
+                    extra_consonant_prob=extra_consonant_prob,
+                )
 
             if enable_dashes and name_length > 3 and i % 2 == 1:  # Add a dash after every two components for better flow
                 if i < name_length - 2:  # Don't add a dash after the last component
                     name += "-"
         
-        name += generate_name_component()  # Ensure the last component doesn't have an extra consonant for better flow
+        if random.random() < end_consonant_prob:
+            name += generate_name_component(
+                extra_consonant_prob=extra_consonant_prob,
+            ) + generate_weighted(base_consonant_weights)  # Add a consonant at the end for better flow
+        else:
+            name += generate_name_component(
+                extra_consonant_prob=extra_consonant_prob,
+            )  # Ensure the last component doesn't have an extra consonant for better flow
 
     name = name.capitalize()
     if random.random() < prefix_prob:
@@ -93,16 +130,37 @@ def generate_town_name(suffix_prob=0.3, prefix_prob=0.2, geo_prob=0.2, vowel_sta
 
 
 class TownNameGenerator:
-    def __init__(self, suffix_prob=0.3, prefix_prob=0.2, geo_prob=0.2, vowel_start_prob=0.2, name_length_max=6, enable_dashes=True):
+    def __init__(
+        self,
+        suffix_prob=TOWN_NAME_GENERATOR["suffix_prob"],
+        prefix_prob=TOWN_NAME_GENERATOR["prefix_prob"],
+        geo_prob=TOWN_NAME_GENERATOR["geo_prob"],
+        vowel_start_prob=TOWN_NAME_GENERATOR["vowel_start_prob"],
+        name_length_max=TOWN_NAME_GENERATOR["name_length_max"],
+        enable_dashes=TOWN_NAME_GENERATOR["enable_dashes"],
+        extra_consonant_prob=TOWN_NAME_GENERATOR["extra_consonant_prob"],
+        end_consonant_prob=TOWN_NAME_GENERATOR["end_consonant_prob"]
+    ):
         self.suffix_prob = suffix_prob
         self.prefix_prob = prefix_prob
         self.geo_prob = geo_prob
         self.vowel_start_prob = vowel_start_prob
         self.name_length_max = name_length_max
         self.enable_dashes = enable_dashes
+        self.extra_consonant_prob = extra_consonant_prob
+        self.end_consonant_prob = end_consonant_prob
 
     def generate_town_name(self):
-        return generate_town_name(self.suffix_prob, self.prefix_prob, self.geo_prob, self.vowel_start_prob, self.name_length_max, self.enable_dashes)
+        return generate_town_name(
+            self.suffix_prob,
+            self.prefix_prob,
+            self.geo_prob,
+            self.vowel_start_prob,
+            self.name_length_max,
+            self.enable_dashes,
+            self.extra_consonant_prob,
+            self.end_consonant_prob
+        )
 
 # Example usage
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+from config import TOWN_GENERATION
 from mapgen import render_terrain
 from towngen import (
     DEFAULT_HEIGHTMAP_PATH,
@@ -119,6 +120,10 @@ def build_town_map_html(
     terrain_counts = {
         terrain: sum(1 for town in town_data if town["terrain"] == terrain)
         for terrain in ("beach", "plains", "hills", "mountains", "snow")
+    }
+    town_size_counts = {
+        size: sum(1 for town in town_data if town["size"] == size)
+        for size in ("Ghost Town", "Hamlet/Outpost", "Village", "Town", "City", "Metropolis", "Megaopolis")
     }
 
     payload = {
@@ -424,6 +429,13 @@ def build_town_map_html(
         <span><strong>{terrain_counts["hills"]}</strong>hills</span>
         <span><strong>{terrain_counts["mountains"]}</strong>mountains</span>
         <span><strong>{terrain_counts["snow"]}</strong>snow</span>
+        <span><strong>{town_size_counts["Ghost Town"]}</strong>ghost towns</span>
+        <span><strong>{town_size_counts["Hamlet/Outpost"]}</strong>hamlets/outposts</span>
+        <span><strong>{town_size_counts["Village"]}</strong>villages</span>
+        <span><strong>{town_size_counts["Town"]}</strong>towns</span>
+        <span><strong>{town_size_counts["City"]}</strong>cities</span>
+        <span><strong>{town_size_counts["Metropolis"]}</strong>metropolises</span>
+        <span><strong>{town_size_counts["Megaopolis"]}</strong>megaopolises</span>
       </div>
     </header>
     <section class="workspace">
@@ -615,10 +627,10 @@ def write_town_map(
     output_path=DEFAULT_OUTPUT_PATH,
     plot_output_path=DEFAULT_PLOT_OUTPUT_PATH,
     terrain_plot_output_path=None,
-    town_count=64,
+    town_count=TOWN_GENERATION["default_town_count"],
     heightmap_path=DEFAULT_HEIGHTMAP_PATH,
-    threshold_km=50,
-    max_attempts=1000,
+    threshold_km=TOWN_GENERATION["default_spacing_threshold_km"],
+    max_attempts=TOWN_GENERATION["default_max_attempts"],
     max_render_size=1024,
 ):
     towns, placement_map = generate_towns(
@@ -660,15 +672,23 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Generate towns and export an interactive HTML town map."
     )
-    parser.add_argument("--towns", type=int, default=64)
+    parser.add_argument("--towns", type=int, default=TOWN_GENERATION["default_town_count"])
     parser.add_argument("--heightmap", default=DEFAULT_HEIGHTMAP_PATH)
     parser.add_argument("--output", default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--plot-output", default=DEFAULT_PLOT_OUTPUT_PATH)
     parser.add_argument("--terrain-plot-output", default=DEFAULT_TERRAIN_PLOT_OUTPUT_PATH)
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--write-terrain-plot", action="store_true")
-    parser.add_argument("--threshold-km", type=float, default=50)
-    parser.add_argument("--max-attempts", type=int, default=1000)
+    parser.add_argument(
+        "--threshold-km",
+        type=float,
+        default=TOWN_GENERATION["default_spacing_threshold_km"],
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=TOWN_GENERATION["default_max_attempts"],
+    )
     parser.add_argument("--max-render-size", type=int, default=1024)
     return parser.parse_args()
 

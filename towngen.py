@@ -6,6 +6,16 @@ import random
 
 import numpy as np
 
+from config import (
+    CITY_SPECIALIZATIONS as CONFIG_CITY_SPECIALIZATIONS,
+    GLOBAL_SEED,
+    MAP,
+    TOWN_DENSITY,
+    TOWN_GENERATION,
+    TOWN_NAME_GENERATOR,
+    TOWN_PLACEMENT,
+    TOWN_SIZES,
+)
 import townnamegen
 from mapgen import (
     BEACH_WIDTH,
@@ -19,13 +29,12 @@ from mapgen import (
     town_center_terrain_mask,
 )
 
-random.seed(42)  # Set a fixed seed for reproducibility
+random.seed(GLOBAL_SEED)  # Set a fixed seed for reproducibility
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_HEIGHTMAP_PATH = BASE_DIR / "csv" / "world_heightmap.npy"
 
-MAP_LENGTH = 4096  # Length of the map in km
-MAP_WIDTH = 4096  # Width of the map in km
+MAP_WIDTH, MAP_LENGTH = MAP["size"]  # Dimensions in km; one pixel is one sq km.
 _GROWTH_NEIGHBORS = (
     (-1, -1),
     (0, -1),
@@ -37,39 +46,11 @@ _GROWTH_NEIGHBORS = (
     (1, 1),
 )
 
-town_sizes = [
-    # Type, min_population, max_population, probability_weight
-    ("Ghost Town", 0, 0, 0),
-    ("Hamlet/Outpost", 10, 99, 0.05),
-    ("Village", 100, 9999, 0.2),
-    ("Town", 10000, 99999, 0.45),
-    ("City", 100000, 999999, 0.15),
-    ("Metropolis", 1000000, 9909999, 0.05),
-    ("Megaopolis", 10000000, 50000000, 0.01),
-]
+town_sizes = TOWN_SIZES
+town_density = TOWN_DENSITY
+CITY_SPECIALIZATIONS = CONFIG_CITY_SPECIALIZATIONS
 
-town_density = {
-    # Type, min_density, max_density (pop per sq km)
-    "Ghost Town": (0, 0),
-    "Hamlet/Outpost": (10, 50),
-    "Village": (50, 500),
-    "Town": (200, 1000),
-    "City": (1000, 5000),
-    "Metropolis": (10000, 20000),
-    "Megaopolis": (20000, 50000),
-}
-
-CITY_SPECIALIZATIONS = [
-    # Type, probability_weight
-    ("Commercial", 0.3), 
-    ("Industrial", 0.2), 
-    ("Cultural", 0.1), 
-    ("Financial", 0.15), 
-    ("Governmental", 0.05), 
-    ("Tourism", 0.1)
-]
-
-townNameGen = townnamegen.TownNameGenerator(0, 0, 0, 0.3, 5, False)
+townNameGen = townnamegen.TownNameGenerator(**TOWN_NAME_GENERATOR)
 
 
 class TownPlacementMap:
@@ -185,7 +166,7 @@ class TownPlacementMap:
         if pixel_indices.size == 0:
             return None
 
-        for _ in range(1000):
+        for _ in range(TOWN_PLACEMENT["candidate_sample_attempts"]):
             flat_index = int(pixel_indices[random.randrange(pixel_indices.size)])
             pixel_y, pixel_x = divmod(flat_index, self.width)
             if self.is_available_pixel(pixel_x, pixel_y, allowed_mask):
@@ -236,8 +217,8 @@ class TownPlacementMap:
             return loc_x, loc_y, self.terrain_at_pixel(pixel_x, pixel_y)
 
         coastal_bias = {
-            "Metropolis": 0.75,
-            "Megaopolis": 0.90,
+            "Metropolis": TOWN_GENERATION["metropolis_coastal_bias"],
+            "Megaopolis": TOWN_GENERATION["megaopolis_coastal_bias"],
         }.get(town_size, 0.0)
 
         pixel = None
@@ -289,20 +270,24 @@ class TownPlacementMap:
 
         terrain = self.terrain_at_pixel(pixel_x, pixel_y)
         if town_size == "Hamlet/Outpost":
-            terrain_cost = {
-                "plains": 0.0,
-                "hills": 0.16,
-                "mountains": 0.0,
-                "snow": 0.22,
-            }.get(terrain, 10_000)
+            terrain_cost = TOWN_PLACEMENT["hamlet_outpost_terrain_growth_cost"].get(
+                terrain,
+                TOWN_PLACEMENT["blocked_terrain_growth_cost"],
+            )
         else:
-            terrain_cost = {
-                "plains": 0.0,
-                "beach": 0.18,
-                "hills": 0.28,
-            }.get(terrain, 10_000)
-        edge_noise = random.uniform(0.0, 0.75)
-        wobble = 0.08 * math.sin((pixel_x * 0.31) + (pixel_y * 0.17) + angle)
+            terrain_cost = TOWN_PLACEMENT["normal_terrain_growth_cost"].get(
+                terrain,
+                TOWN_PLACEMENT["blocked_terrain_growth_cost"],
+            )
+        edge_noise = random.uniform(
+            TOWN_PLACEMENT["growth_edge_noise_min"],
+            TOWN_PLACEMENT["growth_edge_noise_max"],
+        )
+        wobble = TOWN_PLACEMENT["growth_wobble_weight"] * math.sin(
+            (pixel_x * TOWN_PLACEMENT["growth_wobble_x_frequency"])
+            + (pixel_y * TOWN_PLACEMENT["growth_wobble_y_frequency"])
+            + angle
+        )
         return shaped_distance + terrain_cost + edge_noise + wobble
 
     def place_town_footprint(self, town):
@@ -318,7 +303,10 @@ class TownPlacementMap:
             raise Exception(f"{town.name} center is not available for town placement.")
 
         angle = random.uniform(0.0, math.tau)
-        stretch = random.uniform(0.72, 1.38)
+        stretch = random.uniform(
+            TOWN_PLACEMENT["growth_stretch_min"],
+            TOWN_PLACEMENT["growth_stretch_max"],
+        )
         footprint = []
         claimed = set()
         queued = set()
@@ -405,7 +393,13 @@ class TownPlacementMap:
 
         if terrain_counts["beach"] > 0 or self.footprint_touches_water(town):
             town.specialization = "Fishing"
-        elif terrain_counts["hills"] >= max(1, int(town.placed_area_pixels * 0.20)):
+        elif terrain_counts["hills"] >= max(
+            1,
+            int(
+                town.placed_area_pixels
+                * TOWN_PLACEMENT["mining_specialization_hills_fraction"]
+            ),
+        ):
             town.specialization = "Mining"
         else:
             town.specialization = "Farming"
@@ -460,12 +454,18 @@ class Town:
         return random.randint(min_density, max_density) if max_density > 0 else 0
 
     def generate_establishment_and_abandonment_years(self):
-        current_year = 2024
-        est_year = random.randint(1870, current_year - 50)
+        current_year = TOWN_GENERATION["current_year"]
+        est_year = random.randint(
+            TOWN_GENERATION["established_start_year"],
+            current_year - TOWN_GENERATION["minimum_established_age_years"],
+        )
         abandoned_year = None
 
         if self.size == "Ghost Town":
-            abandoned_year = random.randint(est_year + 10, current_year)
+            abandoned_year = random.randint(
+                est_year + TOWN_GENERATION["minimum_abandoned_age_years"],
+                current_year,
+            )
 
         return est_year, abandoned_year
 
@@ -480,7 +480,11 @@ class Town:
         self.loc_y = random.uniform(-MAP_LENGTH / 2, MAP_LENGTH / 2)
         self.terrain = None
 
-    def check_closeness(self, other_town, threshold_km=50):
+    def check_closeness(
+        self,
+        other_town,
+        threshold_km=TOWN_GENERATION["default_spacing_threshold_km"],
+    ):
         distance = (
             (self.loc_x - other_town.loc_x) ** 2
             + (self.loc_y - other_town.loc_y) ** 2
@@ -491,9 +495,9 @@ class Town:
     def generate_coords(
         self,
         existing_towns,
-        threshold_km=50,
+        threshold_km=TOWN_GENERATION["default_spacing_threshold_km"],
         placement_map=None,
-        max_attempts=1000,
+        max_attempts=TOWN_GENERATION["default_max_attempts"],
     ):
         for _ in range(max_attempts):
             self.generate_random_coords(placement_map=placement_map)
@@ -511,10 +515,10 @@ class Town:
 
 
 def generate_towns(
-    town_count=64,
+    town_count=TOWN_GENERATION["default_town_count"],
     heightmap_path=DEFAULT_HEIGHTMAP_PATH,
-    threshold_km=50,
-    max_attempts=1000,
+    threshold_km=TOWN_GENERATION["default_spacing_threshold_km"],
+    max_attempts=TOWN_GENERATION["default_max_attempts"],
 ):
     placement_map = TownPlacementMap.from_file(heightmap_path)
     towns = []
@@ -807,7 +811,9 @@ def export_town_data_to_csv(towns, filename=None):
 
 
 if __name__ == "__main__":
-    existing_towns, town_placement_map = generate_towns(64)
+    existing_towns, town_placement_map = generate_towns(
+        TOWN_GENERATION["default_town_count"]
+    )
 
     for town in existing_towns:
         print_town_info(town)

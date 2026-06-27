@@ -6,42 +6,31 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+from config import (
+    GLOBAL_SEED,
+    MAP,
+    MAP_COLORS,
+    MAP_CONTINENT,
+    MAP_NOISE,
+    MAP_TERRAIN,
+)
+
 try:
     from opensimplex import OpenSimplex
 except ModuleNotFoundError:
     OpenSimplex = None
 
 # Map size is stored as (width, height) in pixels/cells.
-MAP_SIZE = (4096, 4096)
-MAP_SCALE = 256.0
-NOISE_SETTINGS = {
-    "octaves": 6,
-    "persistence": 0.5,
-    "lacunarity": 2.0,
-}
-
-COLORS = {
-    "water": (0, 105, 148),
-    "beach": (238, 214, 175),
-    "plains": (34, 139, 34),
-    "hills": (139, 69, 19),
-    "mountains": (169, 169, 169),
-    "snow": (245, 245, 245),
-}
-WATER_LEVEL = 0.18
-BEACH_WIDTH = 0.04
-PLAINS_LEVEL = 0.6
-HILLS_LEVEL = 0.75
-MOUNTAINS_LEVEL = 0.9
-CONTINENT_SETTINGS = {
-    "coast_start": 0.72,
-    "coast_end": 0.98,
-    "edge_power": 2.8,
-    "land_floor_above_water": 0.05,
-    "coast_roughness": 0.28,
-    "coast_noise_scale": 220.0,
-    "coast_noise_octaves": 4,
-}
+MAP_SIZE = MAP["size"]
+MAP_SCALE = MAP["scale"]
+NOISE_SETTINGS = MAP_NOISE
+COLORS = MAP_COLORS
+WATER_LEVEL = MAP_TERRAIN["water_level"]
+BEACH_WIDTH = MAP_TERRAIN["beach_width"]
+PLAINS_LEVEL = MAP_TERRAIN["plains_level"]
+HILLS_LEVEL = MAP_TERRAIN["hills_level"]
+MOUNTAINS_LEVEL = MAP_TERRAIN["mountains_level"]
+CONTINENT_SETTINGS = MAP_CONTINENT
 
 
 def classify_terrain_value(elevation, water_level=WATER_LEVEL, beach_width=BEACH_WIDTH):
@@ -140,15 +129,15 @@ def _smoothstep(edge0, edge1, values):
 
 def _continent_falloff(
     map_size,
-    seed=42,
+    seed=GLOBAL_SEED,
     coast_start=CONTINENT_SETTINGS["coast_start"],
     coast_end=CONTINENT_SETTINGS["coast_end"],
     edge_power=CONTINENT_SETTINGS["edge_power"],
     coast_roughness=CONTINENT_SETTINGS["coast_roughness"],
     coast_noise_scale=CONTINENT_SETTINGS["coast_noise_scale"],
     coast_noise_octaves=CONTINENT_SETTINGS["coast_noise_octaves"],
-    chunk_rows=256,
-    sample_step=4,
+    chunk_rows=MAP["chunk_rows"],
+    sample_step=MAP["sample_step"],
 ):
     width, height = _map_dimensions(map_size)
     x = np.linspace(-1.0, 1.0, width, dtype=np.float32)
@@ -163,19 +152,22 @@ def _continent_falloff(
             map_size=map_size,
             scale=coast_noise_scale,
             octaves=coast_noise_octaves,
-            persistence=0.55,
-            lacunarity=2.0,
+            persistence=CONTINENT_SETTINGS["coast_noise_persistence"],
+            lacunarity=CONTINENT_SETTINGS["coast_noise_lacunarity"],
             chunk_rows=chunk_rows,
-            sample_step=max(sample_step * 2, 8),
+            sample_step=max(
+                sample_step * CONTINENT_SETTINGS["coast_noise_sample_step_multiplier"],
+                CONTINENT_SETTINGS["coast_noise_min_sample_step"],
+            ),
         )
         coast_noise = (normalize(coast_noise) * 2.0) - 1.0
         inner_band = _smoothstep(
-            coast_start - 0.22,
-            coast_start + 0.06,
+            coast_start + CONTINENT_SETTINGS["coast_inner_start_offset"],
+            coast_start + CONTINENT_SETTINGS["coast_inner_end_offset"],
             distance_from_center,
         )
         outer_band = 1.0 - _smoothstep(
-            coast_end - 0.08,
+            coast_end + CONTINENT_SETTINGS["coast_outer_start_offset"],
             coast_end,
             distance_from_center,
         )
@@ -194,8 +186,8 @@ def _fractal_noise_2d(
     octaves=NOISE_SETTINGS["octaves"],
     persistence=NOISE_SETTINGS["persistence"],
     lacunarity=NOISE_SETTINGS["lacunarity"],
-    chunk_rows=256,
-    sample_step=4,
+    chunk_rows=MAP["chunk_rows"],
+    sample_step=MAP["sample_step"],
 ):
     """Generate chunked fractal OpenSimplex noise as a float32 heightmap."""
     width, height = _map_dimensions(map_size)
@@ -238,7 +230,7 @@ def _fractal_noise_2d(
 def _shape_as_continent(
     heightmap,
     map_size,
-    seed=42,
+    seed=GLOBAL_SEED,
     water_level=WATER_LEVEL,
     exponent=1.0,
     coast_start=CONTINENT_SETTINGS["coast_start"],
@@ -248,8 +240,8 @@ def _shape_as_continent(
     coast_roughness=CONTINENT_SETTINGS["coast_roughness"],
     coast_noise_scale=CONTINENT_SETTINGS["coast_noise_scale"],
     coast_noise_octaves=CONTINENT_SETTINGS["coast_noise_octaves"],
-    chunk_rows=256,
-    sample_step=4,
+    chunk_rows=MAP["chunk_rows"],
+    sample_step=MAP["sample_step"],
 ):
     terrain = normalize(heightmap, exponent=exponent)
     falloff = _continent_falloff(
@@ -271,17 +263,17 @@ def _shape_as_continent(
 
 
 def generate_terrain(
-    seed=42,
-    exponent=2,
+    seed=GLOBAL_SEED,
+    exponent=MAP["exponent"],
     parallel=False,
     workers=None,
-    chunk_rows=256,
+    chunk_rows=MAP["chunk_rows"],
     map_size=MAP_SIZE,
     scale=MAP_SCALE,
     octaves=NOISE_SETTINGS["octaves"],
     persistence=NOISE_SETTINGS["persistence"],
     lacunarity=NOISE_SETTINGS["lacunarity"],
-    sample_step=4,
+    sample_step=MAP["sample_step"],
     water_level=WATER_LEVEL,
     coast_start=CONTINENT_SETTINGS["coast_start"],
     coast_end=CONTINENT_SETTINGS["coast_end"],
@@ -322,7 +314,11 @@ def generate_terrain(
         sample_step=sample_step,
     )
     ridges = 1.0 - np.abs(base)
-    heightmap = (base * 0.86) + (ridges * 0.14)
+    heightmap = (
+        base * MAP["base_height_weight"]
+    ) + (
+        ridges * MAP["ridge_height_weight"]
+    )
     return _shape_as_continent(
         heightmap,
         map_size=map_size,
@@ -393,10 +389,10 @@ def load_heightmap(filename):
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Generate and export terrain maps.")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=GLOBAL_SEED)
     parser.add_argument("--width", type=int, default=MAP_SIZE[0])
     parser.add_argument("--height", type=int, default=MAP_SIZE[1])
-    parser.add_argument("--sample-step", type=int, default=4)
+    parser.add_argument("--sample-step", type=int, default=MAP["sample_step"])
     parser.add_argument("--water-level", type=float, default=WATER_LEVEL)
     parser.add_argument(
         "--coast-roughness",
