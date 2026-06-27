@@ -182,3 +182,18 @@ TRANSPORT_GENERATION = {
         "town": "#0f766e",
     },
 }
+
+TRANSPORT_ROUTING = {
+    "speed_limits_kmh": {
+        "road": 60,
+        "bridge": 120,
+        "freeway": 120,
+        "railway": 140,
+        "airway": 400,
+    },
+    "freeway_toll": {
+        "per_km_rate": 0.05,
+        "city_entry_fee": 1.00,
+        "tolled_city_sizes": ["Town", "Village", "City", "Metropolis", "Megaopolis"],
+    },
+}

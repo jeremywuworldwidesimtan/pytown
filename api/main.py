@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+from collections import defaultdict
+import heapq
 import json
 import re
 import sqlite3
@@ -14,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
+from config import TRANSPORT_ROUTING
+
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATABASE_PATH = BASE_DIR / "api" / "database.db"
@@ -24,6 +28,30 @@ TRANSPORT_OVERLAY_DIR = BASE_DIR / "web"
 MAP_WIDTH = 4096
 MAP_HEIGHT = 4096
 TRANSPORT_LAYERS = ("road", "bridge", "freeway", "railway", "airway")
+ROAD_NETWORK_TYPES = ("road", "bridge", "freeway")
+ROUTE_TYPE_ALIASES = {
+    "roads": ("road", "bridge"),
+    "road-network": ROAD_NETWORK_TYPES,
+    "road_network": ROAD_NETWORK_TYPES,
+    "roadnetwork": ROAD_NETWORK_TYPES,
+    "driving": ROAD_NETWORK_TYPES,
+    "drive": ROAD_NETWORK_TYPES,
+    "rail": ("railway",),
+    "rails": ("railway",),
+    "train": ("railway",),
+    "trains": ("railway",),
+    "flight": ("airway",),
+    "flights": ("airway",),
+    "air": ("airway",),
+    "airways": ("airway",),
+}
+ROUTE_TYPE_PRIORITY = {
+    "airway": 0,
+    "railway": 1,
+    "freeway": 2,
+    "bridge": 3,
+    "road": 4,
+}
 
 
 app = FastAPI(title="PyTown API", version="0.1.0")
@@ -106,6 +134,420 @@ def _route_from_row(row: sqlite3.Row) -> dict:
         "route_coords": json.loads(row["route_coords_json"]),
         "screen_coords": json.loads(row["screen_coords_json"]),
     }
+
+
+def _town_reference(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "size": row["size"],
+        "terrain": row["terrain"],
+        "loc_x": round(row["x_coordinate"], 2),
+        "loc_y": round(row["y_coordinate"], 2),
+    }
+
+
+def _round_distance(value: float) -> float:
+    return round(value, 3)
+
+
+def _round_duration(value: float) -> float:
+    return round(value, 3)
+
+
+def _round_money(value: float) -> float:
+    return round(value, 2)
+
+
+def _format_money(value: float) -> str:
+    return f"${_round_money(value):,.2f}"
+
+
+def _format_duration(hours: float) -> str:
+    total_minutes = int(round(hours * 60))
+    days, remainder = divmod(total_minutes, 24 * 60)
+    whole_hours, minutes = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if whole_hours or days:
+        parts.append(f"{whole_hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+def _speed_limit_kmh(route_type: str) -> float:
+    return float(TRANSPORT_ROUTING["speed_limits_kmh"][route_type])
+
+
+def _edge_duration_hours(edge: dict) -> float:
+    return edge["distance_km"] / _speed_limit_kmh(edge["route_type"])
+
+
+def _is_tolled_city_entry(edge: dict, town_lookup: dict[int, dict]) -> bool:
+    if edge["route_type"] != "freeway":
+        return False
+
+    toll_settings = TRANSPORT_ROUTING["freeway_toll"]
+    to_town = town_lookup[edge["to_town_id"]]
+    return to_town["size"] in set(toll_settings["tolled_city_sizes"])
+
+
+def _freeway_toll_cost(edge: dict, town_lookup: dict[int, dict]) -> float:
+    if edge["route_type"] != "freeway":
+        return 0.0
+
+    toll_settings = TRANSPORT_ROUTING["freeway_toll"]
+    toll_cost = edge["distance_km"] * float(toll_settings["per_km_rate"])
+    if _is_tolled_city_entry(edge, town_lookup):
+        toll_cost += float(toll_settings["city_entry_fee"])
+    return toll_cost
+
+
+def _parse_route_types(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return TRANSPORT_LAYERS
+
+    route_types: list[str] = []
+    unknown: list[str] = []
+    for raw_token in value.split(","):
+        token = raw_token.strip().lower()
+        if not token:
+            continue
+        expanded = ROUTE_TYPE_ALIASES.get(token)
+        if expanded is None and token in TRANSPORT_LAYERS:
+            expanded = (token,)
+        if expanded is None:
+            unknown.append(token)
+            continue
+        for route_type in expanded:
+            if route_type not in route_types:
+                route_types.append(route_type)
+
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown transport type(s): {', '.join(sorted(unknown))}",
+        )
+    if not route_types:
+        raise HTTPException(status_code=400, detail="At least one transport type is required.")
+    return tuple(route_types)
+
+
+def _resolve_town(conn: sqlite3.Connection, value: str, label: str) -> sqlite3.Row:
+    token = value.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail=f"{label} location is required.")
+
+    if token.isdigit():
+        row = conn.execute("SELECT * FROM towns WHERE id = ?", (int(token),)).fetchone()
+        if row is not None:
+            return row
+
+    exact = conn.execute(
+        "SELECT * FROM towns WHERE LOWER(name) = LOWER(?) ORDER BY population DESC, name",
+        (token,),
+    ).fetchall()
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"{label} location is ambiguous.",
+                "matches": [_town_reference(row) for row in exact[:10]],
+            },
+        )
+
+    matches = conn.execute(
+        """
+        SELECT *
+        FROM towns
+        WHERE LOWER(name) LIKE LOWER(?)
+        ORDER BY
+            CASE WHEN LOWER(name) LIKE LOWER(?) THEN 0 ELSE 1 END,
+            population DESC,
+            name
+        LIMIT 11
+        """,
+        (f"%{token}%", f"{token}%"),
+    ).fetchall()
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"{label} location is ambiguous.",
+                "matches": [_town_reference(row) for row in matches[:10]],
+            },
+        )
+    raise HTTPException(status_code=404, detail=f"{label} location not found.")
+
+
+def _route_type_penalty(route_type: str) -> int:
+    return ROUTE_TYPE_PRIORITY.get(route_type, 10)
+
+
+def _directed_edge(row: sqlite3.Row, from_town_id: int, to_town_id: int) -> dict:
+    reverse = from_town_id != row["from_town_id"]
+    route_coords = json.loads(row["route_coords_json"])
+    screen_coords = json.loads(row["screen_coords_json"])
+    if reverse:
+        route_coords.reverse()
+        screen_coords.reverse()
+
+    return {
+        "route_id": row["route_id"],
+        "route_type": row["route_type"],
+        "edge_id": row["edge_id"],
+        "from_town_id": from_town_id,
+        "to_town_id": to_town_id,
+        "distance_km": float(row["distance_km"]),
+        "is_bridge": bool(row["is_bridge"]),
+        "route_coords": route_coords,
+        "screen_coords": screen_coords,
+    }
+
+
+def _shortest_transport_path(
+    conn: sqlite3.Connection,
+    source_town_id: int,
+    target_town_id: int,
+    route_types: tuple[str, ...],
+) -> tuple[float, list[dict]]:
+    if source_town_id == target_town_id:
+        return 0.0, []
+
+    placeholders = ",".join("?" for _ in route_types)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM transport_routes
+        WHERE route_type IN ({placeholders})
+        """,
+        route_types,
+    ).fetchall()
+
+    adjacency: dict[int, list[dict]] = defaultdict(list)
+    for row in rows:
+        from_town_id = row["from_town_id"]
+        to_town_id = row["to_town_id"]
+        adjacency[from_town_id].append(_directed_edge(row, from_town_id, to_town_id))
+        adjacency[to_town_id].append(_directed_edge(row, to_town_id, from_town_id))
+
+    best: dict[int, tuple[float, int]] = {source_town_id: (0.0, 0)}
+    previous: dict[int, tuple[int, dict]] = {}
+    heap: list[tuple[float, int, int]] = [(0.0, 0, source_town_id)]
+
+    while heap:
+        distance, penalty, town_id = heapq.heappop(heap)
+        if (distance, penalty) != best.get(town_id):
+            continue
+        if town_id == target_town_id:
+            break
+
+        for edge in adjacency.get(town_id, []):
+            next_id = edge["to_town_id"]
+            next_distance = distance + edge["distance_km"]
+            next_penalty = penalty + _route_type_penalty(edge["route_type"])
+            next_best = (next_distance, next_penalty)
+            if next_best < best.get(next_id, (float("inf"), 10**9)):
+                best[next_id] = next_best
+                previous[next_id] = (town_id, edge)
+                heapq.heappush(heap, (next_distance, next_penalty, next_id))
+
+    if target_town_id not in best:
+        return float("inf"), []
+
+    path: list[dict] = []
+    current_id = target_town_id
+    while current_id != source_town_id:
+        previous_id, edge = previous[current_id]
+        path.append(edge)
+        current_id = previous_id
+    path.reverse()
+    return best[target_town_id][0], path
+
+
+def _towns_by_id(conn: sqlite3.Connection, town_ids: Iterable[int]) -> dict[int, dict]:
+    unique_ids = list(dict.fromkeys(town_ids))
+    if not unique_ids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = conn.execute(
+        f"SELECT * FROM towns WHERE id IN ({placeholders})",
+        unique_ids,
+    ).fetchall()
+    return {row["id"]: _town_reference(row) for row in rows}
+
+
+def _transport_action(route_type: str) -> str:
+    return {
+        "airway": "Fly",
+        "railway": "Take the railway",
+        "freeway": "Drive on the freeway",
+        "bridge": "Cross by bridge road",
+        "road": "Drive",
+    }.get(route_type, "Travel")
+
+
+def _transport_category(route_type: str) -> str:
+    return "road_network" if route_type in ROAD_NETWORK_TYPES else route_type
+
+
+def _format_stop_names(stops: list[dict]) -> str:
+    return ", ".join(stop["name"] for stop in stops)
+
+
+def _build_leg_instruction(category: str, from_town: dict, to_town: dict, stopovers: list[dict]) -> str:
+    if category == "airway":
+        base = f"Fly from {from_town['name']} to {to_town['name']}"
+        return f"{base} with stopover(s) at {_format_stop_names(stopovers)}." if stopovers else f"{base}."
+    if category == "railway":
+        base = f"Take the railway from {from_town['name']} to {to_town['name']}"
+        return f"{base} stopping at {_format_stop_names(stopovers)}." if stopovers else f"{base}."
+
+    base = f"Drive from {from_town['name']} to {to_town['name']}"
+    return f"{base} via {_format_stop_names(stopovers)}." if stopovers else f"{base}."
+
+
+def _build_steps_and_legs(path: list[dict], town_lookup: dict[int, dict]) -> tuple[list[dict], list[dict]]:
+    steps = []
+    step_metrics = []
+    for index, edge in enumerate(path, start=1):
+        from_town = town_lookup[edge["from_town_id"]]
+        to_town = town_lookup[edge["to_town_id"]]
+        action = _transport_action(edge["route_type"])
+        duration_hours = _edge_duration_hours(edge)
+        toll_cost = _freeway_toll_cost(edge, town_lookup)
+        city_entry_fee_applied = _is_tolled_city_entry(edge, town_lookup)
+        step_metrics.append({"duration_hours": duration_hours, "toll_cost": toll_cost})
+        steps.append(
+            {
+                "step_number": index,
+                "route_id": edge["route_id"],
+                "edge_id": edge["edge_id"],
+                "route_type": edge["route_type"],
+                "transport_category": _transport_category(edge["route_type"]),
+                "from": from_town,
+                "to": to_town,
+                "distance_km": _round_distance(edge["distance_km"]),
+                "speed_limit_kmh": _speed_limit_kmh(edge["route_type"]),
+                "duration_hours": _round_duration(duration_hours),
+                "duration_minutes": _round_duration(duration_hours * 60),
+                "formatted_duration": _format_duration(duration_hours),
+                "toll_cost": _round_money(toll_cost),
+                "formatted_toll_cost": _format_money(toll_cost),
+                "toll_city_entry_fee_applied": city_entry_fee_applied,
+                "is_bridge": edge["is_bridge"],
+                "instruction": f"{action} from {from_town['name']} to {to_town['name']}.",
+                "route_coords": edge["route_coords"],
+                "screen_coords": edge["screen_coords"],
+            }
+        )
+
+    legs = []
+    current_edges: list[dict] = []
+    current_category: str | None = None
+    current_start_step = 1
+
+    def flush_leg() -> None:
+        if not current_edges or current_category is None:
+            return
+        stop_ids = [current_edges[0]["from_town_id"]]
+        stop_ids.extend(edge["to_town_id"] for edge in current_edges)
+        stops = [town_lookup[town_id] for town_id in stop_ids]
+        stopovers = stops[1:-1]
+        distance = sum(edge["distance_km"] for edge in current_edges)
+        metric_slice = step_metrics[current_start_step - 1 : current_start_step - 1 + len(current_edges)]
+        duration_hours = sum(metric["duration_hours"] for metric in metric_slice)
+        toll_cost = sum(metric["toll_cost"] for metric in metric_slice)
+        route_types = []
+        for edge in current_edges:
+            if edge["route_type"] not in route_types:
+                route_types.append(edge["route_type"])
+        from_town = stops[0]
+        to_town = stops[-1]
+        legs.append(
+            {
+                "leg_number": len(legs) + 1,
+                "transport_category": current_category,
+                "route_types": route_types,
+                "from": from_town,
+                "to": to_town,
+                "distance_km": _round_distance(distance),
+                "duration_hours": _round_duration(duration_hours),
+                "duration_minutes": _round_duration(duration_hours * 60),
+                "formatted_duration": _format_duration(duration_hours),
+                "toll_cost": _round_money(toll_cost),
+                "formatted_toll_cost": _format_money(toll_cost),
+                "stops": stops,
+                "stopovers": stopovers,
+                "step_numbers": list(range(current_start_step, current_start_step + len(current_edges))),
+                "instruction": _build_leg_instruction(
+                    current_category,
+                    from_town,
+                    to_town,
+                    stopovers,
+                ),
+            }
+        )
+
+    for step_index, edge in enumerate(path, start=1):
+        category = _transport_category(edge["route_type"])
+        if current_edges and category != current_category:
+            flush_leg()
+            current_edges = []
+            current_start_step = step_index
+        current_category = category
+        current_edges.append(edge)
+    flush_leg()
+
+    return steps, legs
+
+
+def _distance_breakdown(path: list[dict]) -> dict[str, float]:
+    totals = {route_type: 0.0 for route_type in TRANSPORT_LAYERS}
+    totals["road_network"] = 0.0
+    for edge in path:
+        route_type = edge["route_type"]
+        totals[route_type] = totals.get(route_type, 0.0) + edge["distance_km"]
+        if route_type in ROAD_NETWORK_TYPES:
+            totals["road_network"] += edge["distance_km"]
+    return {
+        route_type: _round_distance(distance)
+        for route_type, distance in totals.items()
+        if distance > 0
+    }
+
+
+def _duration_breakdown(path: list[dict]) -> dict[str, dict]:
+    totals = {route_type: 0.0 for route_type in TRANSPORT_LAYERS}
+    totals["road_network"] = 0.0
+    for edge in path:
+        route_type = edge["route_type"]
+        duration_hours = _edge_duration_hours(edge)
+        totals[route_type] = totals.get(route_type, 0.0) + duration_hours
+        if route_type in ROAD_NETWORK_TYPES:
+            totals["road_network"] += duration_hours
+    return {
+        route_type: {
+            "hours": _round_duration(duration),
+            "minutes": _round_duration(duration * 60),
+            "formatted": _format_duration(duration),
+        }
+        for route_type, duration in totals.items()
+        if duration > 0
+    }
+
+
+def _total_duration_hours(path: list[dict]) -> float:
+    return sum(_edge_duration_hours(edge) for edge in path)
+
+
+def _total_toll_cost(path: list[dict], town_lookup: dict[int, dict]) -> float:
+    return sum(_freeway_toll_cost(edge, town_lookup) for edge in path)
 
 
 def _rows_to_count_map(rows: Iterable[sqlite3.Row]) -> dict[str, int]:
@@ -293,6 +735,76 @@ def get_transport_routes(types: str | None = Query(default=None)) -> dict:
     return {
         "total": len(rows),
         "routes": [_route_from_row(row) for row in rows],
+    }
+
+
+@app.get("/api/directions")
+def get_directions(
+    origin: str = Query(alias="from", min_length=1),
+    destination: str = Query(alias="to", min_length=1),
+    transports: str | None = Query(
+        default=None,
+        description=(
+            "Comma-separated route types to use. Valid values: road, bridge, "
+            "freeway, railway, airway, road_network, train, flight. Defaults to all."
+        ),
+    ),
+    types: str | None = Query(
+        default=None,
+        description="Alias for transports.",
+    ),
+) -> dict:
+    requested_route_types = _parse_route_types(transports or types)
+
+    with _connect() as conn:
+        source = _resolve_town(conn, origin, "Origin")
+        target = _resolve_town(conn, destination, "Destination")
+        total_distance, path = _shortest_transport_path(
+            conn,
+            source["id"],
+            target["id"],
+            requested_route_types,
+        )
+        if total_distance == float("inf"):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No route found between the requested locations using "
+                    f"transport type(s): {', '.join(requested_route_types)}."
+                ),
+            )
+
+        path_town_ids = [source["id"]]
+        path_town_ids.extend(edge["to_town_id"] for edge in path)
+        town_lookup = _towns_by_id(conn, path_town_ids)
+
+    steps, legs = _build_steps_and_legs(path, town_lookup)
+    total_duration_hours = _total_duration_hours(path)
+    total_toll_cost = _total_toll_cost(path, town_lookup)
+    return {
+        "origin": _town_reference(source),
+        "destination": _town_reference(target),
+        "requested_transport_types": requested_route_types,
+        "algorithm": "dijkstra_shortest_path_by_distance_km",
+        "routing_config": {
+            "speed_limits_kmh": TRANSPORT_ROUTING["speed_limits_kmh"],
+            "freeway_toll": TRANSPORT_ROUTING["freeway_toll"],
+        },
+        "total_distance_km": _round_distance(total_distance),
+        "distance_by_transport_km": _distance_breakdown(path),
+        "eta": {
+            "hours": _round_duration(total_duration_hours),
+            "minutes": _round_duration(total_duration_hours * 60),
+            "formatted": _format_duration(total_duration_hours),
+        },
+        "duration_by_transport": _duration_breakdown(path),
+        "toll_cost": _round_money(total_toll_cost),
+        "formatted_toll_cost": _format_money(total_toll_cost),
+        "town_path": [town_lookup[town_id] for town_id in path_town_ids],
+        "leg_count": len(legs),
+        "step_count": len(steps),
+        "legs": legs,
+        "steps": steps,
     }
 
 
