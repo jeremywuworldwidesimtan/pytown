@@ -7,3 +7,5 @@ web/
 *.csv
 *.png
 *.db
+web/town_map.html
+web/town_pixels_only.png

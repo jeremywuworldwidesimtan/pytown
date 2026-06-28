@@ -1,11 +1,15 @@
 import {
+  ArrowRight,
   Building2,
   ChevronLeft,
   ChevronRight,
+  Clock3,
+  DollarSign,
   Layers,
   LocateFixed,
   MapPinned,
   Minus,
+  Navigation,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
@@ -33,6 +37,57 @@ const TRANSPORT_LAYERS = [
   { id: "railway", label: "Railways", color: "#111827", width: 4, dash: "18 10" },
   { id: "airway", label: "Air routes", color: "#7c3aed", width: 3, dash: "12 18" },
 ];
+const DIRECTION_PROFILES = [
+  {
+    id: "best",
+    label: "Best available",
+    description: "Roads, bridges, freeways, rail, and flights",
+    transports: null,
+    color: "#dc2626",
+  },
+  {
+    id: "road",
+    label: "Road network",
+    description: "Roads, bridges, and freeways",
+    transports: "road_network",
+    color: "#f97316",
+  },
+  {
+    id: "road-only",
+    label: "Standard routes only",
+    description: "Toll-free roads only",
+    transports: "road",
+    color: "#4b5563",
+  },
+  {
+    id: "road-rail",
+    label: "Road + rail",
+    description: "Road access with railway segments",
+    transports: "road_network,railway",
+    color: "#0f172a",
+  },
+  {
+    id: "road-flight",
+    label: "Road + flight",
+    description: "Road access with flight segments",
+    transports: "road_network,airway",
+    color: "#7c3aed",
+  },
+  {
+    id: "rail",
+    label: "Rail only",
+    description: "Railway route where connected",
+    transports: "railway",
+    color: "#111827",
+  },
+  {
+    id: "flight",
+    label: "Flight only",
+    description: "Direct or connected air route",
+    transports: "airway",
+    color: "#2563eb",
+  },
+];
 
 const INITIAL_VISIBLE_LAYERS = {
   townPixels: true,
@@ -47,9 +102,22 @@ function formatNumber(value) {
   return new Intl.NumberFormat().format(value ?? 0);
 }
 
+function formatKm(value) {
+  if (value === null || value === undefined) return "0 km";
+  return `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 1 })} km`;
+}
+
 function pathFromCoords(coords) {
   if (!coords?.length) return "";
   return coords.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+}
+
+function buildDirectionPath(option) {
+  return option?.steps?.map((step) => pathFromCoords(step.screen_coords)).filter(Boolean) ?? [];
+}
+
+function directionSignature(option) {
+  return option.steps?.map((step) => step.route_id).join(">") ?? "";
 }
 
 function clamp(value, min, max) {
@@ -142,6 +210,223 @@ function LayerButton({ layer, enabled, onToggle }) {
   );
 }
 
+function DirectionPlanner({
+  towns,
+  navigation,
+  selectedOption,
+  onOriginChange,
+  onDestinationChange,
+  onSubmit,
+  onSwap,
+  onClear,
+  onSelectOption,
+  onSetActiveStep,
+}) {
+  const activeStep = selectedOption?.steps?.[navigation.activeStepIndex] ?? null;
+
+  return (
+    <section className="shrink-0 border-b border-slate-200 p-3">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="inline-flex items-center gap-2 text-[12px] font-bold uppercase tracking-normal text-slate-500">
+          <Navigation size={15} />
+          Directions
+        </div>
+        {navigation.options.length > 0 && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="h-7 rounded-md border border-slate-200 px-2 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
+      <form className="space-y-2" onSubmit={onSubmit}>
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+          <input
+            value={navigation.origin}
+            onChange={(event) => onOriginChange(event.target.value)}
+            className="h-10 min-w-0 rounded-md border border-slate-200 bg-slate-50 px-3 text-[13px] text-slate-950 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
+            placeholder="From town"
+            list="town-direction-options"
+            type="search"
+          />
+          <button
+            type="button"
+            title="Swap origin and destination"
+            onClick={onSwap}
+            className="grid h-10 w-10 place-items-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+          >
+            <ArrowRight size={16} />
+          </button>
+          <input
+            value={navigation.destination}
+            onChange={(event) => onDestinationChange(event.target.value)}
+            className="h-10 min-w-0 rounded-md border border-slate-200 bg-slate-50 px-3 text-[13px] text-slate-950 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
+            placeholder="To town"
+            list="town-direction-options"
+            type="search"
+          />
+        </div>
+        <datalist id="town-direction-options">
+          {towns.map((town) => (
+            <option key={town.id} value={town.name} />
+          ))}
+        </datalist>
+        <button
+          type="submit"
+          disabled={navigation.loading}
+          className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-[13px] font-semibold text-white transition hover:bg-slate-800 disabled:cursor-wait disabled:bg-slate-400"
+        >
+          <Route size={16} />
+          {navigation.loading ? "Finding routes..." : "Find directions"}
+        </button>
+      </form>
+
+      {navigation.error && (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[12px] font-medium text-red-700">
+          {navigation.error}
+        </div>
+      )}
+
+      {navigation.options.length > 0 && (
+        <div className="mt-3 space-y-2">
+          <div className="text-[11px] font-semibold uppercase tracking-normal text-slate-500">
+            Route options
+          </div>
+          <div className="grid gap-2">
+            {navigation.options.map((option) => {
+              const selected = selectedOption?.option_id === option.option_id;
+              return (
+                <button
+                  key={option.option_id}
+                  type="button"
+                  onClick={() => onSelectOption(option.option_id)}
+                  className={`rounded-md border p-3 text-left transition ${
+                    selected
+                      ? "border-blue-400 bg-blue-50 shadow-sm"
+                      : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: option.color }} />
+                        <span className="truncate text-[13px] font-semibold text-slate-950">{option.label}</span>
+                      </div>
+                      <div className="mt-0.5 truncate text-[11px] text-slate-500">{option.description}</div>
+                    </div>
+                    <div className="shrink-0 text-right text-[11px] font-semibold text-slate-600">
+                      {option.step_count} steps
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+                    <div>
+                      <div className="font-semibold text-slate-950">{formatKm(option.total_distance_km)}</div>
+                      <div className="text-slate-500">Distance</div>
+                    </div>
+                    <div>
+                      <div className="font-semibold text-slate-950">{option.eta?.formatted ?? "0m"}</div>
+                      <div className="text-slate-500">ETA</div>
+                    </div>
+                    <div>
+                      <div className="font-semibold text-slate-950">{option.formatted_cost ?? option.formatted_toll_cost ?? "$0.00"}</div>
+                      <div className="text-slate-500">Cost</div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {selectedOption && (
+        <div className="mt-3 rounded-md border border-slate-200 bg-white p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="truncate text-[13px] font-semibold text-slate-950">{selectedOption.label}</div>
+              <div className="text-[11px] text-slate-500">
+                Step {Math.min(navigation.activeStepIndex + 1, selectedOption.step_count)} of {selectedOption.step_count}
+              </div>
+            </div>
+            <div className="flex shrink-0 overflow-hidden rounded-md border border-slate-200">
+              <button
+                type="button"
+                title="Previous step"
+                className="grid h-8 w-8 place-items-center hover:bg-slate-50 disabled:text-slate-300"
+                disabled={navigation.activeStepIndex === 0}
+                onClick={() => onSetActiveStep(Math.max(0, navigation.activeStepIndex - 1))}
+              >
+                <ChevronLeft size={15} />
+              </button>
+              <button
+                type="button"
+                title="Next step"
+                className="grid h-8 w-8 place-items-center border-l border-slate-200 hover:bg-slate-50 disabled:text-slate-300"
+                disabled={navigation.activeStepIndex >= selectedOption.step_count - 1}
+                onClick={() => onSetActiveStep(Math.min(selectedOption.step_count - 1, navigation.activeStepIndex + 1))}
+              >
+                <ChevronRight size={15} />
+              </button>
+            </div>
+          </div>
+
+          {activeStep && (
+            <div className="mt-3 rounded-md bg-slate-50 p-3">
+              <div className="text-[12px] font-semibold leading-5 text-slate-950">{activeStep.instruction}</div>
+              <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-slate-600">
+                <span className="inline-flex items-center gap-1">
+                  <Route size={13} />
+                  {formatKm(activeStep.distance_km)}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <Clock3 size={13} />
+                  {activeStep.formatted_duration}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <DollarSign size={13} />
+                  {activeStep.formatted_cost ?? activeStep.formatted_toll_cost}
+                </span>
+              </div>
+            </div>
+          )}
+
+          <ol className="mt-3 max-h-[260px] space-y-2 overflow-auto pr-1">
+            {selectedOption.steps.map((step, index) => {
+              const active = index === navigation.activeStepIndex;
+              return (
+                <li key={`${step.route_id}-${index}`}>
+                  <button
+                    type="button"
+                    onClick={() => onSetActiveStep(index)}
+                    className={`w-full rounded-md border px-3 py-2 text-left transition ${
+                      active
+                        ? "border-blue-300 bg-blue-50"
+                        : "border-slate-200 bg-white hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="text-[12px] font-semibold leading-5 text-slate-950">
+                      {index + 1}. {step.instruction}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                      <span>{formatKm(step.distance_km)}</span>
+                      <span>{step.formatted_duration}</span>
+                      <span>{step.formatted_cost ?? step.formatted_toll_cost}</span>
+                      <span className="capitalize">{step.route_type}</span>
+                    </div>
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Sidebar({
   collapsed,
   map,
@@ -149,7 +434,16 @@ function Sidebar({
   selectedTownId,
   search,
   setSearch,
+  navigation,
+  selectedNavigationOption,
   onSelectTown,
+  onOriginChange,
+  onDestinationChange,
+  onSubmitDirections,
+  onSwapDirections,
+  onClearDirections,
+  onSelectNavigationOption,
+  onSetActiveNavigationStep,
   onToggleSidebar,
 }) {
   const filteredTowns = useMemo(() => {
@@ -195,7 +489,7 @@ function Sidebar({
           <Route size={22} />
         </div>
       ) : (
-        <>
+        <div className="min-h-0 flex-1 overflow-auto">
           <div className="shrink-0 border-b border-slate-200 p-4">
             <div className="grid grid-cols-2 gap-4">
               <SummaryMetric label="Towns" value={formatNumber(map?.summary?.town_count)} />
@@ -219,6 +513,19 @@ function Sidebar({
               ))}
             </div>
           </div>
+
+          <DirectionPlanner
+            towns={towns}
+            navigation={navigation}
+            selectedOption={selectedNavigationOption}
+            onOriginChange={onOriginChange}
+            onDestinationChange={onDestinationChange}
+            onSubmit={onSubmitDirections}
+            onSwap={onSwapDirections}
+            onClear={onClearDirections}
+            onSelectOption={onSelectNavigationOption}
+            onSetActiveStep={onSetActiveNavigationStep}
+          />
 
           <div className="shrink-0 border-b border-slate-200 p-3">
             <div className="relative">
@@ -271,7 +578,7 @@ function Sidebar({
               </tbody>
             </table>
           </div>
-        </>
+        </div>
       )}
     </aside>
   );
@@ -343,6 +650,9 @@ function MapCanvas({
   visibleLayers,
   setVisibleLayers,
   selectedTownId,
+  navigationOptions,
+  selectedNavigationOption,
+  activeNavigationStepIndex,
   onSelectTown,
 }) {
   const viewportRef = useRef(null);
@@ -361,6 +671,10 @@ function MapCanvas({
       return groups;
     }, {});
   }, [routes]);
+  const visibleNavigationOptions = useMemo(() => {
+    if (selectedNavigationOption) return [selectedNavigationOption];
+    return navigationOptions;
+  }, [navigationOptions, selectedNavigationOption]);
 
   function updateScale(nextScale) {
     setView((current) => ({ ...current, scale: clamp(nextScale, 0.14, 2.8) }));
@@ -518,6 +832,51 @@ function MapCanvas({
             </g>
           ))}
 
+          {visibleNavigationOptions.length > 0 && (
+            <g pointerEvents="none">
+              {visibleNavigationOptions.map((option, optionIndex) => {
+                const selected = selectedNavigationOption?.option_id === option.option_id;
+                const opacity = selectedNavigationOption && !selected ? 0 : selected ? 1 : 0.78;
+                return (
+                  <g key={option.option_id} opacity={opacity}>
+                    {buildDirectionPath(option).map((pathData, segmentIndex) => {
+                      const active = selected && segmentIndex === activeNavigationStepIndex;
+                      return (
+                        <g key={`${option.option_id}-${segmentIndex}`}>
+                          <path
+                            data-nav-route={option.option_id}
+                            data-nav-segment={segmentIndex}
+                            data-nav-backdrop="true"
+                            d={pathData}
+                            fill="none"
+                            stroke="white"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={active ? 18 : selected ? 14 : 11}
+                            vectorEffect="non-scaling-stroke"
+                          />
+                          <path
+                            data-nav-route={option.option_id}
+                            data-nav-segment={segmentIndex}
+                            data-nav-active={active ? "true" : "false"}
+                            d={pathData}
+                            fill="none"
+                            stroke={active ? "#facc15" : option.color}
+                            strokeDasharray={selected ? "" : optionIndex % 2 === 0 ? "" : "16 10"}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={active ? 10 : selected ? 8 : 5}
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        </g>
+                      );
+                    })}
+                  </g>
+                );
+              })}
+            </g>
+          )}
+
           <g>
             {towns.map((town) => {
               const selected = selectedTownId === town.id;
@@ -579,12 +938,135 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [selectedTownId, setSelectedTownId] = useState(null);
   const [visibleLayers, setVisibleLayers] = useState(INITIAL_VISIBLE_LAYERS);
+  const [navigation, setNavigation] = useState({
+    origin: "",
+    destination: "",
+    loading: false,
+    error: null,
+    options: [],
+    selectedOptionId: null,
+    activeStepIndex: 0,
+  });
+
+  const selectedNavigationOption = useMemo(
+    () => navigation.options.find((option) => option.option_id === navigation.selectedOptionId) ?? null,
+    [navigation.options, navigation.selectedOptionId],
+  );
 
   useEffect(() => {
     if (selectedTownId === null && towns.length) {
       setSelectedTownId(towns[0].id);
     }
   }, [selectedTownId, towns]);
+
+  useEffect(() => {
+    if (!towns.length) return;
+    setNavigation((current) => {
+      if (current.origin || current.destination) return current;
+      return {
+        ...current,
+        origin: towns[0]?.name ?? "",
+        destination: towns[1]?.name ?? "",
+      };
+    });
+  }, [towns]);
+
+  async function loadDirectionOption(profile, origin, destination) {
+    const params = new URLSearchParams({ from: origin, to: destination });
+    if (profile.transports) {
+      params.set("transports", profile.transports);
+    }
+    const response = await fetch(`${API_ROOT}/api/directions?${params.toString()}`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return {
+      ...data,
+      option_id: profile.id,
+      profile_id: profile.id,
+      label: profile.label,
+      description: profile.description,
+      color: profile.color,
+      signature: directionSignature(data),
+    };
+  }
+
+  async function handleSubmitDirections(event) {
+    event.preventDefault();
+    const origin = navigation.origin.trim();
+    const destination = navigation.destination.trim();
+    if (!origin || !destination) {
+      setNavigation((current) => ({
+        ...current,
+        error: "Choose both an origin and a destination town.",
+      }));
+      return;
+    }
+
+    setNavigation((current) => ({
+      ...current,
+      loading: true,
+      error: null,
+      options: [],
+      selectedOptionId: null,
+      activeStepIndex: 0,
+    }));
+
+    try {
+      const settled = await Promise.allSettled(
+        DIRECTION_PROFILES.map((profile) => loadDirectionOption(profile, origin, destination)),
+      );
+      const options = [];
+      const seen = new Set();
+      for (const result of settled) {
+        if (result.status !== "fulfilled" || !result.value) continue;
+        const option = result.value;
+        const signature = option.signature || `${option.total_distance_km}-${option.step_count}-${option.cost}`;
+        if (option.profile_id !== "best" && seen.has(signature)) continue;
+        seen.add(signature);
+        options.push(option);
+      }
+
+      setNavigation((current) => ({
+        ...current,
+        loading: false,
+        error: options.length ? null : "No direction options found for those towns.",
+        options,
+        selectedOptionId: null,
+        activeStepIndex: 0,
+      }));
+    } catch (error) {
+      setNavigation((current) => ({
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : "Unable to fetch directions.",
+      }));
+    }
+  }
+
+  function clearDirections() {
+    setNavigation((current) => ({
+      ...current,
+      error: null,
+      options: [],
+      selectedOptionId: null,
+      activeStepIndex: 0,
+    }));
+  }
+
+  function selectNavigationOption(optionId) {
+    setNavigation((current) => ({
+      ...current,
+      selectedOptionId: optionId,
+      activeStepIndex: 0,
+    }));
+  }
+
+  function setActiveNavigationStep(index) {
+    setNavigation((current) => ({
+      ...current,
+      activeStepIndex: index,
+    }));
+  }
 
   if (loading) {
     return (
@@ -613,7 +1095,22 @@ export default function App() {
         selectedTownId={selectedTownId}
         search={search}
         setSearch={setSearch}
+        navigation={navigation}
+        selectedNavigationOption={selectedNavigationOption}
         onSelectTown={setSelectedTownId}
+        onOriginChange={(value) => setNavigation((current) => ({ ...current, origin: value }))}
+        onDestinationChange={(value) => setNavigation((current) => ({ ...current, destination: value }))}
+        onSubmitDirections={handleSubmitDirections}
+        onSwapDirections={() =>
+          setNavigation((current) => ({
+            ...current,
+            origin: current.destination,
+            destination: current.origin,
+          }))
+        }
+        onClearDirections={clearDirections}
+        onSelectNavigationOption={selectNavigationOption}
+        onSetActiveNavigationStep={setActiveNavigationStep}
         onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
       />
       <MapCanvas
@@ -623,6 +1120,9 @@ export default function App() {
         visibleLayers={visibleLayers}
         setVisibleLayers={setVisibleLayers}
         selectedTownId={selectedTownId}
+        navigationOptions={navigation.options}
+        selectedNavigationOption={selectedNavigationOption}
+        activeNavigationStepIndex={navigation.activeStepIndex}
         onSelectTown={setSelectedTownId}
       />
     </div>

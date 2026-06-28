@@ -191,9 +191,23 @@ TRANSPORT_ROUTING = {
         "railway": 140,
         "airway": 400,
     },
-    "freeway_toll": {
-        "per_km_rate": 0.05,
-        "city_entry_fee": 1.00,
-        "tolled_city_sizes": ["Town", "Village", "City", "Metropolis", "Megaopolis"],
+    "costs": {
+        "freeway": {
+            "per_km_rate": 0.05,
+            "city_entry_fee": 1.00,
+            "tolled_city_sizes": ["Town", "Village", "City", "Metropolis", "Megaopolis"],
+        },
+        "bridge": {
+            "per_km_rate": 0.05,
+            "base_fee": 1.00,
+        },
+        "railway": {
+            "per_km_rate": 0.10,
+            "station_fee": 2.00,
+        },
+        "airway": {
+            "per_km_rate": 0.50,
+            "departure_fee": 10.00,
+        },
     },
 }

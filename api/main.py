@@ -184,24 +184,53 @@ def _edge_duration_hours(edge: dict) -> float:
     return edge["distance_km"] / _speed_limit_kmh(edge["route_type"])
 
 
-def _is_tolled_city_entry(edge: dict, town_lookup: dict[int, dict]) -> bool:
+def _cost_settings(route_type: str) -> dict:
+    return TRANSPORT_ROUTING["costs"].get(route_type, {})
+
+
+def _is_freeway_city_entry(edge: dict, town_lookup: dict[int, dict]) -> bool:
     if edge["route_type"] != "freeway":
         return False
 
-    toll_settings = TRANSPORT_ROUTING["freeway_toll"]
+    toll_settings = _cost_settings("freeway")
     to_town = town_lookup[edge["to_town_id"]]
     return to_town["size"] in set(toll_settings["tolled_city_sizes"])
 
 
-def _freeway_toll_cost(edge: dict, town_lookup: dict[int, dict]) -> float:
-    if edge["route_type"] != "freeway":
-        return 0.0
+def _edge_cost_details(edge: dict, town_lookup: dict[int, dict]) -> dict:
+    route_type = edge["route_type"]
+    settings = _cost_settings(route_type)
+    components = {}
 
-    toll_settings = TRANSPORT_ROUTING["freeway_toll"]
-    toll_cost = edge["distance_km"] * float(toll_settings["per_km_rate"])
-    if _is_tolled_city_entry(edge, town_lookup):
-        toll_cost += float(toll_settings["city_entry_fee"])
-    return toll_cost
+    if route_type == "freeway":
+        components["distance"] = edge["distance_km"] * float(settings["per_km_rate"])
+        if _is_freeway_city_entry(edge, town_lookup):
+            components["city_entry_fee"] = float(settings["city_entry_fee"])
+    elif route_type == "bridge":
+        components["distance"] = edge["distance_km"] * float(settings["per_km_rate"])
+        components["base_fee"] = float(settings["base_fee"])
+    elif route_type == "railway":
+        components["distance"] = edge["distance_km"] * float(settings["per_km_rate"])
+        components["station_fee"] = float(settings["station_fee"])
+    elif route_type == "airway":
+        components["distance"] = edge["distance_km"] * float(settings["per_km_rate"])
+        components["departure_fee"] = float(settings["departure_fee"])
+
+    return {
+        "amount": sum(components.values()),
+        "components": {
+            name: _round_money(value)
+            for name, value in components.items()
+            if value > 0
+        },
+        "freeway_city_entry_fee_applied": _is_freeway_city_entry(edge, town_lookup),
+        "railway_station_fee_applied": route_type == "railway",
+        "flight_departure_fee_applied": route_type == "airway",
+    }
+
+
+def _edge_transport_cost(edge: dict, town_lookup: dict[int, dict]) -> float:
+    return float(_edge_cost_details(edge, town_lookup)["amount"])
 
 
 def _parse_route_types(value: str | None) -> tuple[str, ...]:
@@ -420,9 +449,14 @@ def _build_steps_and_legs(path: list[dict], town_lookup: dict[int, dict]) -> tup
         to_town = town_lookup[edge["to_town_id"]]
         action = _transport_action(edge["route_type"])
         duration_hours = _edge_duration_hours(edge)
-        toll_cost = _freeway_toll_cost(edge, town_lookup)
-        city_entry_fee_applied = _is_tolled_city_entry(edge, town_lookup)
-        step_metrics.append({"duration_hours": duration_hours, "toll_cost": toll_cost})
+        cost_details = _edge_cost_details(edge, town_lookup)
+        transport_cost = cost_details["amount"]
+        step_metrics.append(
+            {
+                "duration_hours": duration_hours,
+                "transport_cost": transport_cost,
+            }
+        )
         steps.append(
             {
                 "step_number": index,
@@ -437,9 +471,14 @@ def _build_steps_and_legs(path: list[dict], town_lookup: dict[int, dict]) -> tup
                 "duration_hours": _round_duration(duration_hours),
                 "duration_minutes": _round_duration(duration_hours * 60),
                 "formatted_duration": _format_duration(duration_hours),
-                "toll_cost": _round_money(toll_cost),
-                "formatted_toll_cost": _format_money(toll_cost),
-                "toll_city_entry_fee_applied": city_entry_fee_applied,
+                "cost": _round_money(transport_cost),
+                "formatted_cost": _format_money(transport_cost),
+                "cost_components": cost_details["components"],
+                "toll_cost": _round_money(transport_cost),
+                "formatted_toll_cost": _format_money(transport_cost),
+                "toll_city_entry_fee_applied": cost_details["freeway_city_entry_fee_applied"],
+                "railway_station_fee_applied": cost_details["railway_station_fee_applied"],
+                "flight_departure_fee_applied": cost_details["flight_departure_fee_applied"],
                 "is_bridge": edge["is_bridge"],
                 "instruction": f"{action} from {from_town['name']} to {to_town['name']}.",
                 "route_coords": edge["route_coords"],
@@ -462,7 +501,7 @@ def _build_steps_and_legs(path: list[dict], town_lookup: dict[int, dict]) -> tup
         distance = sum(edge["distance_km"] for edge in current_edges)
         metric_slice = step_metrics[current_start_step - 1 : current_start_step - 1 + len(current_edges)]
         duration_hours = sum(metric["duration_hours"] for metric in metric_slice)
-        toll_cost = sum(metric["toll_cost"] for metric in metric_slice)
+        transport_cost = sum(metric["transport_cost"] for metric in metric_slice)
         route_types = []
         for edge in current_edges:
             if edge["route_type"] not in route_types:
@@ -480,8 +519,10 @@ def _build_steps_and_legs(path: list[dict], town_lookup: dict[int, dict]) -> tup
                 "duration_hours": _round_duration(duration_hours),
                 "duration_minutes": _round_duration(duration_hours * 60),
                 "formatted_duration": _format_duration(duration_hours),
-                "toll_cost": _round_money(toll_cost),
-                "formatted_toll_cost": _format_money(toll_cost),
+                "cost": _round_money(transport_cost),
+                "formatted_cost": _format_money(transport_cost),
+                "toll_cost": _round_money(transport_cost),
+                "formatted_toll_cost": _format_money(transport_cost),
                 "stops": stops,
                 "stopovers": stopovers,
                 "step_numbers": list(range(current_start_step, current_start_step + len(current_edges))),
@@ -546,8 +587,24 @@ def _total_duration_hours(path: list[dict]) -> float:
     return sum(_edge_duration_hours(edge) for edge in path)
 
 
-def _total_toll_cost(path: list[dict], town_lookup: dict[int, dict]) -> float:
-    return sum(_freeway_toll_cost(edge, town_lookup) for edge in path)
+def _cost_breakdown(path: list[dict], town_lookup: dict[int, dict]) -> dict[str, float]:
+    totals = {route_type: 0.0 for route_type in TRANSPORT_LAYERS}
+    totals["road_network"] = 0.0
+    for edge in path:
+        route_type = edge["route_type"]
+        cost = _edge_transport_cost(edge, town_lookup)
+        totals[route_type] = totals.get(route_type, 0.0) + cost
+        if route_type in ROAD_NETWORK_TYPES:
+            totals["road_network"] += cost
+    return {
+        route_type: _round_money(cost)
+        for route_type, cost in totals.items()
+        if cost > 0
+    }
+
+
+def _total_transport_cost(path: list[dict], town_lookup: dict[int, dict]) -> float:
+    return sum(_edge_transport_cost(edge, town_lookup) for edge in path)
 
 
 def _rows_to_count_map(rows: Iterable[sqlite3.Row]) -> dict[str, int]:
@@ -780,7 +837,7 @@ def get_directions(
 
     steps, legs = _build_steps_and_legs(path, town_lookup)
     total_duration_hours = _total_duration_hours(path)
-    total_toll_cost = _total_toll_cost(path, town_lookup)
+    total_transport_cost = _total_transport_cost(path, town_lookup)
     return {
         "origin": _town_reference(source),
         "destination": _town_reference(target),
@@ -788,7 +845,7 @@ def get_directions(
         "algorithm": "dijkstra_shortest_path_by_distance_km",
         "routing_config": {
             "speed_limits_kmh": TRANSPORT_ROUTING["speed_limits_kmh"],
-            "freeway_toll": TRANSPORT_ROUTING["freeway_toll"],
+            "costs": TRANSPORT_ROUTING["costs"],
         },
         "total_distance_km": _round_distance(total_distance),
         "distance_by_transport_km": _distance_breakdown(path),
@@ -798,8 +855,11 @@ def get_directions(
             "formatted": _format_duration(total_duration_hours),
         },
         "duration_by_transport": _duration_breakdown(path),
-        "toll_cost": _round_money(total_toll_cost),
-        "formatted_toll_cost": _format_money(total_toll_cost),
+        "cost": _round_money(total_transport_cost),
+        "formatted_cost": _format_money(total_transport_cost),
+        "cost_by_transport": _cost_breakdown(path, town_lookup),
+        "toll_cost": _round_money(total_transport_cost),
+        "formatted_toll_cost": _format_money(total_transport_cost),
         "town_path": [town_lookup[town_id] for town_id in path_town_ids],
         "leg_count": len(legs),
         "step_count": len(steps),
